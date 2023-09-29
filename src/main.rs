@@ -1,8 +1,7 @@
 extern crate nix;
 
 use nix::sched::{unshare, CloneFlags};
-use nix::unistd::{chdir, execv, fork, ForkResult};
-use std::ffi::CString;
+use nix::unistd::{chdir, fork, ForkResult};
 use std::process::{Command, Stdio};
 
 fn main() {
@@ -33,6 +32,7 @@ fn main() {
                     "Continuing execution in parent process, new child has pid: {}",
                     child
                 );
+                let _ = nix::sys::wait::waitpid(child, None);
             }
             Ok(ForkResult::Child) => {
                 // Step 2: Isolate the filesystem using the mount namespace
