@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 nix = {version = "0.27.1", features = ["sched","fs","hostname"]}
+serde ={  version = "*" , features = ["derive"]}
+serde_json = "*"

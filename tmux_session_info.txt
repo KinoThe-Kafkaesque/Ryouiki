@@ -1,0 +1,2 @@
+TMUX_SESSION_ID=my_container_session
+TMUX_SERVER_PID=
