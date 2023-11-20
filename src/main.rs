@@ -2,116 +2,181 @@ extern crate nix;
 
 use nix::sched::{unshare, CloneFlags};
 use nix::unistd::{chdir, fork, ForkResult};
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
-use std::io::Result;
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Result, Write};
 use std::os::unix::fs::chroot;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::fs::File;
-use std::io::Write;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Config {
-    Env: Vec<String>,
+// #[derive(Serialize, Deserialize, Debug)]
+// struct Config {
+//     Env: Vec<String>,
+// }
+
+// fn load_manifest() -> Result<Value> {
+//     let file_content = fs::read_to_string("./assets/manifest/debian/manifest.json")?;
+//     serde_json::from_str(&file_content)
+//         .map_err(|err| io::Error::new(ErrorKind::Other, format!("JSON parsing error: {}", err)))
+// }
+
+// fn get_path_from_manifest(json: &Value) -> Option<String> {
+//     json.as_array()
+//         .and_then(|arr| arr.first())
+//         .and_then(|first_manifest| {
+//             first_manifest
+//                 .get("Config")
+//                 .and_then(|c| c.get("Env"))
+//                 .and_then(|env| env.as_array())
+//                 .and_then(|env_array| env_array.first())
+//                 .and_then(|p| p.as_str())
+//                 .map(|s| s.to_string())
+//         })
+// }
+
+fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    for line_result in reader.lines() {
+        let line = line_result?;
+        if line.starts_with("PATH=") {
+            return Ok(line.strip_prefix("PATH=").map(|s| s.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+fn create_namespace() {
+    match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS) {
+        // match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNET) {
+        Ok(_) => println!("Successfully created a new user and mount namespace."),
+        Err(err) => eprintln!("Failed to create a new user namespace: {:?}", err),
+    }
 }
 
-fn load_manifest() -> Result<Value> {
-    // Read the JSON file
-    let file_content = fs::read_to_string("./assets/manifest/ubuntu/manifest.json")?;
+fn isolate_filesystem() {
+    chdir("/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/debian")
+        .expect("chdir failed");
+    chroot(".").expect("Failed to apply chroot");
+}
 
-    // Parse the JSON file
-    let json: Value = serde_json::from_str(&file_content)?;
+fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
+    // Command::new("sh")
+    //     .arg("-c")
+    //     .arg("locale-gen en_US.UTF-8")
+    //     .env("PATH", os_path)
+    //     .spawn()
+    //     .expect("Failed to execute command");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("PATH", os_path)
+        // .env("LANG", "en_US.UTF-8")
+        // .env("LC_ALL", "en_US.UTF-8")
+        // .env("LANGUAGE", "en_US:en")
+        // .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("Failed to execute command");
+    child.wait().expect("Failed to wait on command");
 
-    Ok(json)
+    let pid = child.id();
+
+    pid
 }
 
 fn main() {
-    // Step 1: Create a new user namespace
-    match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS) {
-        Ok(_) => {
-            println!("Successfully created a new user and mount namespace.");
-            
-            // Here, you'd typically set up ID mappings from the host to the new user namespace
-            
-            // Execute some code to test (e.g., running a shell)
-            let output = Command::new("whoami")
-                .output()
-                .expect("Failed to execute command");
-                
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            println!("Executed command, got output: {}", output_str);
-        },
+    create_namespace();
+
+    // Attempt to load the manifest and extract the path
+    // let path_result = load_manifest().and_then(|json| {
+    //     get_path_from_manifest(&json).ok_or_else(|| {
+    //         std::io::Error::new(std::io::ErrorKind::NotFound, "Path not found in manifest")
+    //     })
+    // });
+    let path_result = get_path_from_env_file(Path::new(
+        "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/debian/.env",
+    ));
+
+    // Check the result and handle errors
+    let os_path = match path_result {
+        Ok(Some(path)) => OsString::from(path),
+        Ok(None) => {
+            eprintln!("Error: {}", "Path not found in manifest");
+            return; // Or handle the error as appropriate for your application
+        }
         Err(err) => {
-            eprintln!("Failed to create a new user namespace: {:?}", err);
-        }
-    }
-
-    //Step 2: load the manifest and set env vars and PATH
-
-    let path = match load_manifest() {
-        Ok(json) => {
-            // Assuming json is an array and we're interested in the first element
-            if let Some(first_manifest) = json.as_array().and_then(|arr| arr.first()) {
-                // Access Config and then Env
-                if let Some(env_array) = first_manifest.get("Config").and_then(|c| c.get("Env").and_then(|env| env.as_array())) {
-                    // Extract PATH, assuming it's the first element
-                    env_array.first().and_then(|p| p.as_str()).map(|s| s.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        Err(e) => {
-            eprintln!("Error loading manifest: {:?}", e);
-            None
+            eprintln!("Error: {}", err);
+            return; // Or handle the error as appropriate for your application
         }
     };
-    let path_str = path.clone().unwrap_or_default();
-    let path_os_str = std::ffi::OsString::from(path_str);
-    let path_ref: &std::ffi::OsStr = path_os_str.as_ref();
-    print!("PATH: {:?}\n", &path_ref.to_str().unwrap().split('=').nth(1).expect("Invalid PATH format"));
 
-// Wait for the bash process to finish
+    // fn prepare_environment() {
+    //     // Run these commands in the isolated environment before executing your main command
+    //     let _ = execute_command("mount -t devpts devpts /dev/pts");
+    //     let _ = Command::new("sh")
+    //     .arg("-c")
+    //     .arg(command)
+    //     .env("PATH", os_path)
+    //     .spawn()
+    //     .expect("Failed to execute command");
+    //     // If necessary, install apt-utils or any other required packages
+    // }
 
     unsafe {
+        let mut container_info =
+            File::create("container_status.txt").expect("Failed to create file");
+        let mut demon_info = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create(true)
+            .open("childern_status.csv")
+            .expect("Failed to open file");
         match fork() {
             Ok(ForkResult::Parent { child, .. }) => {
-                println!(
-                    "Continuing execution in parent process, new child has pid: {}",
-                    child
-                );
+                println!("Parent process, child pid: {}", child);
                 let _ = nix::sys::wait::waitpid(child, None);
-                let mut file = File::create("container_status.txt").expect("Failed to create file");
-                writeln!(file, "Container with PID {} is running", child).expect("Failed to write to file");
+                writeln!(container_info, "Container with PID {} is running", child)
+                    .expect("Failed to write to file");
             }
             Ok(ForkResult::Child) => {
-                // Step 3: Isolate the filesystem using the mount namespace
-                chdir("/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/ubuntu").expect("chdir failed");
-                chroot(".").expect("Failed to apply chroot");
+                match fork() {
+                    Ok(ForkResult::Parent { .. }) => {
+                        std::process::exit(0); // First child exits
+                    }
+                    Ok(ForkResult::Child) => {
+                        match fork() {
+                            Ok(ForkResult::Parent { child, .. }) => {
+                                println!("demon pid: {}", child);
+                                std::process::exit(0)
+                            } // First child exits
+                            Ok(ForkResult::Child) => {
+                                nix::unistd::setsid().expect("Failed to create new session");
+                                isolate_filesystem();
+                                // let command_to_execute =
+                                //     "while true; do date >> timestamp.log; sleep 10; done";
+                                let command_to_execute: &str = "apt-get -y install locales";
+                                let demon_pid = execute_child_process(command_to_execute, &os_path);
 
-                // set the PATH
-                // std::env::set_var("PATH", &path.unwrap());
-                
-                // Step 4: Run /bin/bash
-                Command::new("bash")
-                // .env_clear()
-                .env("HOME", "/home")
-                .env("PATH", &path_ref.to_str().unwrap().split('=').nth(1).expect("Invalid PATH format")) // This exports the PATH to the bash process
-                // .stdin(Stdio::inherit())
-                // .stdout(Stdio::inherit())
-                // .stderr(Stdio::inherit())
-                .spawn()
-                .expect("Failed to start bash");
-                // .wait()
-                // .expect("Failed to wait on bash");
+                                writeln!(
+                                    demon_info,
+                                    "{},{}",
+                                    &command_to_execute,
+                                    &demon_pid.to_string()
+                                )
+                                .expect("Failed to write to file");
+                                demon_info.flush().expect("Failed to flush file");
+                            }
+                            Err(_) => println!("Second fork failed"),
+                        }
+                    }
+                    Err(_) => println!("Fork failed"),
+                }
             }
-            Err(_) => {
-                println!("Fork failed");
-            }
+            Err(_) => println!("Fork failed"),
         }
     }
-
 }
