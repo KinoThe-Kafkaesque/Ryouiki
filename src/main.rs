@@ -12,30 +12,32 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-// #[derive(Serialize, Deserialize, Debug)]
-// struct Config {
-//     Env: Vec<String>,
+
+
+// fn ensure_directory_exists(path: &Path) {
+//     if !path.exists() {
+//         fs::create_dir_all(path).expect("Failed to create directory");
+//     }
+// }
+// fn copy_locale_files(source: &str, destination: &str) {
+//     Command::new("docker")
+//         .args(&["cp", source, destination])
+//         .status()
+//         .expect("Failed to copy files");
+// }
+// fn decompress_charmap(container_id: &str, charmap_path: &str) {
+//     Command::new("docker")
+//         .args(&["exec", container_id, "gunzip", charmap_path])
+//         .status()
+//         .expect("Failed to decompress charmap");
+// }
+// fn generate_locale(container_id: &str, locale: &str) {
+//     Command::new("docker")
+//         .args(&["exec", container_id, "localedef", "-i", locale, "-f", "UTF-8", &format!("{}.UTF-8", locale)])
+//         .status()
+//         .expect("Failed to generate locale");
 // }
 
-// fn load_manifest() -> Result<Value> {
-//     let file_content = fs::read_to_string("./assets/manifest/debian/manifest.json")?;
-//     serde_json::from_str(&file_content)
-//         .map_err(|err| io::Error::new(ErrorKind::Other, format!("JSON parsing error: {}", err)))
-// }
-
-// fn get_path_from_manifest(json: &Value) -> Option<String> {
-//     json.as_array()
-//         .and_then(|arr| arr.first())
-//         .and_then(|first_manifest| {
-//             first_manifest
-//                 .get("Config")
-//                 .and_then(|c| c.get("Env"))
-//                 .and_then(|env| env.as_array())
-//                 .and_then(|env_array| env_array.first())
-//                 .and_then(|p| p.as_str())
-//                 .map(|s| s.to_string())
-//         })
-// }
 
 fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
     let file = File::open(file_path)?;
@@ -75,9 +77,9 @@ fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
         .arg("-c")
         .arg(command)
         .env("PATH", os_path)
-        // .env("LANG", "en_US.UTF-8")
-        // .env("LC_ALL", "en_US.UTF-8")
-        // .env("LANGUAGE", "en_US:en")
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C")
         // .env("TERM", "xterm-256color")
         .spawn()
         .expect("Failed to execute command");
@@ -114,18 +116,6 @@ fn main() {
         }
     };
 
-    // fn prepare_environment() {
-    //     // Run these commands in the isolated environment before executing your main command
-    //     let _ = execute_command("mount -t devpts devpts /dev/pts");
-    //     let _ = Command::new("sh")
-    //     .arg("-c")
-    //     .arg(command)
-    //     .env("PATH", os_path)
-    //     .spawn()
-    //     .expect("Failed to execute command");
-    //     // If necessary, install apt-utils or any other required packages
-    // }
-
     unsafe {
         let mut container_info =
             File::create("container_status.txt").expect("Failed to create file");
@@ -158,9 +148,9 @@ fn main() {
                                 isolate_filesystem();
                                 // let command_to_execute =
                                 //     "while true; do date >> timestamp.log; sleep 10; done";
-                                let command_to_execute: &str = "apt-get -y install locales";
+                                let command_to_execute: &str =
+                                    "apt-get update && apt-get install -y apt-utils";
                                 let demon_pid = execute_child_process(command_to_execute, &os_path);
-
                                 writeln!(
                                     demon_info,
                                     "{},{}",
@@ -180,3 +170,40 @@ fn main() {
         }
     }
 }
+
+// #[derive(Serialize, Deserialize, Debug)]
+// struct Config {
+//     Env: Vec<String>,
+// }
+
+// fn load_manifest() -> Result<Value> {
+//     let file_content = fs::read_to_string("./assets/manifest/debian/manifest.json")?;
+//     serde_json::from_str(&file_content)
+//         .map_err(|err| io::Error::new(ErrorKind::Other, format!("JSON parsing error: {}", err)))
+// }
+
+// fn get_path_from_manifest(json: &Value) -> Option<String> {
+//     json.as_array()
+//         .and_then(|arr| arr.first())
+//         .and_then(|first_manifest| {
+//             first_manifest
+//                 .get("Config")
+//                 .and_then(|c| c.get("Env"))
+//                 .and_then(|env| env.as_array())
+//                 .and_then(|env_array| env_array.first())
+//                 .and_then(|p| p.as_str())
+//                 .map(|s| s.to_string())
+//         })
+// }
+
+// fn prepare_environment() {
+//     // Run these commands in the isolated environment before executing your main command
+//     let _ = execute_command("mount -t devpts devpts /dev/pts");
+//     let _ = Command::new("sh")
+//     .arg("-c")
+//     .arg(command)
+//     .env("PATH", os_path)
+//     .spawn()
+//     .expect("Failed to execute command");
+//     // If necessary, install apt-utils or any other required packages
+// }
