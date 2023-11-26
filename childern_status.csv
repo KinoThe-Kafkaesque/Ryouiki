@@ -64,3 +64,18 @@ apt-get update && apt-get install -y net-tools,621520
 apt-get update && apt-get install -y apt-utils,621791
 locale,622326
 apt-get update && apt-get install -y apt-utils,686751
+apt-get update && apt-get install -y apt-utils,446050
+apt-get update && apt-get install -y apt-utils,462733
+ls /dev,463046
+ls /,463167
+mount | grep --color devpts,496131
+apt-get update && apt-get install -y apt-utils,496617
+apt-get update && apt-get install -y apt-utils,548406
+apt-get update && apt-get install -y apt-utils,561999
+ls /dev,562358
+ls /dev,562479
+ls /dev,859755
+ls /dev,859922
+apt-get update && apt-get install -y apt-utils,860118
+apt-get update && apt-get install -y apt-utils,860569
+apt-get update && apt-get install -y apt-utils,860824

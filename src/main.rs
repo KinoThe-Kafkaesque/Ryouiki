@@ -1,44 +1,15 @@
 extern crate nix;
 
+use nix::libc::{c_char, mount};
 use nix::sched::{unshare, CloneFlags};
 use nix::unistd::{chdir, fork, ForkResult};
 // use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Result, Write};
 use std::os::unix::fs::chroot;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
-
-
-
-// fn ensure_directory_exists(path: &Path) {
-//     if !path.exists() {
-//         fs::create_dir_all(path).expect("Failed to create directory");
-//     }
-// }
-// fn copy_locale_files(source: &str, destination: &str) {
-//     Command::new("docker")
-//         .args(&["cp", source, destination])
-//         .status()
-//         .expect("Failed to copy files");
-// }
-// fn decompress_charmap(container_id: &str, charmap_path: &str) {
-//     Command::new("docker")
-//         .args(&["exec", container_id, "gunzip", charmap_path])
-//         .status()
-//         .expect("Failed to decompress charmap");
-// }
-// fn generate_locale(container_id: &str, locale: &str) {
-//     Command::new("docker")
-//         .args(&["exec", container_id, "localedef", "-i", locale, "-f", "UTF-8", &format!("{}.UTF-8", locale)])
-//         .status()
-//         .expect("Failed to generate locale");
-// }
-
-
+use std::process::Command;
 fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -52,27 +23,68 @@ fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
 
     Ok(None)
 }
-fn create_namespace() {
+
+fn create_namespaces() {
     match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS) {
-        // match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNET) {
-        Ok(_) => println!("Successfully created a new user and mount namespace."),
+        Ok(_) => {
+            // Get the current user ID in the parent namespace
+            let uid_output = Command::new("id").arg("-u").output();
+            match uid_output {
+                Ok(output) => {
+                    if !output.status.success() {
+                        eprintln!("Failed to get user ID");
+                    } else {
+                        let uid = std::str::from_utf8(&output.stdout).unwrap_or("").trim();
+                        println!("Current User ID: {}", &uid);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Failed to run command: {}", err);
+                }
+            }
+            println!("Successfully created a new user and mount namespace.")
+        }
         Err(err) => eprintln!("Failed to create a new user namespace: {:?}", err),
     }
 }
+fn mount_dev_pts() -> std::result::Result<(), std::io::Error> {
+    let mkdir_output = Command::new("sh")
+        .arg("-c")
+        .arg("mkdir -p /dev/pts")
+        .output()?;
 
+    if !mkdir_output.status.success() {
+        let err_msg = std::str::from_utf8(&mkdir_output.stderr)
+            .unwrap_or("Failed to read error message")
+            .trim();
+        eprintln!("Failed to create /dev/pts directory: {}", err_msg);
+        return Err(io::Error::new(io::ErrorKind::Other, "Mkdir command failed"));
+    }
+
+    // Attempt to mount /dev/pts
+    let mount_output = Command::new("sh")
+        .arg("-c")
+        .arg("mount -t devpts devpts /dev/pts")
+        .output()?;
+
+    if !mount_output.status.success() {
+        let err_msg = std::str::from_utf8(&mount_output.stderr)
+            .unwrap_or("Failed to read error message")
+            .trim();
+        eprintln!("Failed to mount /dev/pts: {}", err_msg);
+        return Err(io::Error::new(io::ErrorKind::Other, "Mount command failed"));
+    }
+
+    Ok(())
+}
 fn isolate_filesystem() {
     chdir("/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/debian")
         .expect("chdir failed");
     chroot(".").expect("Failed to apply chroot");
+    mount_dev_pts().expect("Failed to mount devpts");
 }
 
 fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
-    // Command::new("sh")
-    //     .arg("-c")
-    //     .arg("locale-gen en_US.UTF-8")
-    //     .env("PATH", os_path)
-    //     .spawn()
-    //     .expect("Failed to execute command");
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -91,14 +103,7 @@ fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
 }
 
 fn main() {
-    create_namespace();
-
-    // Attempt to load the manifest and extract the path
-    // let path_result = load_manifest().and_then(|json| {
-    //     get_path_from_manifest(&json).ok_or_else(|| {
-    //         std::io::Error::new(std::io::ErrorKind::NotFound, "Path not found in manifest")
-    //     })
-    // });
+    create_namespaces();
     let path_result = get_path_from_env_file(Path::new(
         "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/debian/.env",
     ));
@@ -150,6 +155,7 @@ fn main() {
                                 //     "while true; do date >> timestamp.log; sleep 10; done";
                                 let command_to_execute: &str =
                                     "apt-get update && apt-get install -y apt-utils";
+                                // "ls /dev";
                                 let demon_pid = execute_child_process(command_to_execute, &os_path);
                                 writeln!(
                                     demon_info,
@@ -170,40 +176,3 @@ fn main() {
         }
     }
 }
-
-// #[derive(Serialize, Deserialize, Debug)]
-// struct Config {
-//     Env: Vec<String>,
-// }
-
-// fn load_manifest() -> Result<Value> {
-//     let file_content = fs::read_to_string("./assets/manifest/debian/manifest.json")?;
-//     serde_json::from_str(&file_content)
-//         .map_err(|err| io::Error::new(ErrorKind::Other, format!("JSON parsing error: {}", err)))
-// }
-
-// fn get_path_from_manifest(json: &Value) -> Option<String> {
-//     json.as_array()
-//         .and_then(|arr| arr.first())
-//         .and_then(|first_manifest| {
-//             first_manifest
-//                 .get("Config")
-//                 .and_then(|c| c.get("Env"))
-//                 .and_then(|env| env.as_array())
-//                 .and_then(|env_array| env_array.first())
-//                 .and_then(|p| p.as_str())
-//                 .map(|s| s.to_string())
-//         })
-// }
-
-// fn prepare_environment() {
-//     // Run these commands in the isolated environment before executing your main command
-//     let _ = execute_command("mount -t devpts devpts /dev/pts");
-//     let _ = Command::new("sh")
-//     .arg("-c")
-//     .arg(command)
-//     .env("PATH", os_path)
-//     .spawn()
-//     .expect("Failed to execute command");
-//     // If necessary, install apt-utils or any other required packages
-// }
