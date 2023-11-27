@@ -1,17 +1,159 @@
 extern crate nix;
 
+use clap::Parser;
+use clap::Subcommand;
+use nix::fcntl::open;
+use nix::fcntl::OFlag;
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
+use nix::unistd::getpid;
 use nix::unistd::{chdir, fork, ForkResult};
-// use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use nix::unistd::{close, write};
+use std::collections::HashMap;
+use std::ffi::{CString, OsString};
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::fd::RawFd;
 use std::os::unix::fs::chroot;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{exit, Command};
-use nix::mount::{mount, MsFlags};
-use std::time::Duration;
+use std::sync::mpsc::{self, Sender};
+struct LogMessage {
+    command: String,
+    pid: u32,
+    status: String,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    author = "Nyanpasu",
+    version = "1.0",
+    about = "minimal conatainerization pet project",
+    long_about = "a domain that puts a process in an isolated barrier"
+)]
+struct Cli {
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Inspects running processes
+    Inspect {
+        /// Inspect specific PID(s)
+        #[clap(short, long)]
+        pid: Option<Vec<u32>>,
+
+        /// Inspect all processes
+        #[clap(short = 'a', long)]
+        all: bool,
+    },
+    Start {
+        // container path
+        #[clap(short, long)]
+        path: String,
+
+        // env path
+        #[clap(short, long)]
+        env: String,
+    },
+    Tenkai {
+        // container path
+        #[clap(short, long)]
+        path: String,
+
+        // env path
+        #[clap(short, long)]
+        env: String,
+    },
+}
+
+fn start_logger_thread(pid: u32) -> Sender<LogMessage> {
+    let (tx, rx) = mpsc::channel::<LogMessage>();
+    let log_file_path = format!("./binding_vow/{}.ryouiki", pid);
+    let path = PathBuf::from(&log_file_path);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&path)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to open file: {}", e);
+            std::process::exit(1);
+        });
+
+    let handler = std::thread::Builder::new()
+        .name("logger".to_string())
+        .spawn(move || {
+            let mut log_entries: HashMap<u32, String> = HashMap::new();
+            for log_message in rx {
+                let entry = format!(
+                    "{},{},{}",
+                    log_message.command, log_message.pid, log_message.status
+                );
+                log_entries.insert(log_message.pid, entry);
+
+                for entry in log_entries.values() {
+                    writeln!(file, "{}", entry).expect("Failed to write to file");
+                }
+            }
+        });
+    handler.expect("Failed to create logger thread");
+    tx
+}
+
+fn read_file_contents(file_path: &Path) -> io::Result<String> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    let mut content = String::new();
+    for line in reader.lines() {
+        let line = line?;
+        content.push_str(&line);
+        content.push('\n');
+    }
+
+    Ok(content)
+}
+
+fn inspect_specific_processes(pids: &[u32]) {
+    for &pid in pids {
+        let file_path = PathBuf::from(format!("binding_vow/{}.ryouiki", pid));
+        match read_file_contents(&file_path) {
+            Ok(content) => {
+                println!("--- PID: {} ---\n{}", pid, content);
+            }
+            Err(e) => {
+                eprintln!("Error reading log file for PID {}: {}", pid, e);
+            }
+        }
+    }
+}
+
+fn inspect_all_processes() {
+    let directory_path = Path::new("binding_vow");
+
+    match fs::read_dir(directory_path) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.is_file() {
+                            if let Err(e) = read_file_contents(&path) {
+                                eprintln!("Error reading file {:?}: {}", path, e);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Error reading directory entry: {}", e),
+                }
+            }
+        }
+        Err(e) => eprintln!("Error reading directory {:?}: {}", directory_path, e),
+    }
+}
+//this needs to be automated by getting the Path from the manifest file
 fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -25,42 +167,51 @@ fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
 
     Ok(None)
 }
-fn write_mapping(file: &str, mapping: &str) -> std::io::Result<()> {
-    let mut file = File::create(file)?;
-    file.write_all(mapping.as_bytes())?;
-    Ok(())
+// this is a direct port from linux unshare.c
+fn write_mapping(path: &str, mapping: &str) -> nix::Result<()> {
+    let mapping_c = CString::new(mapping).unwrap();
+
+    let fd: RawFd = open(path, OFlag::O_WRONLY, nix::sys::stat::Mode::empty())?;
+    write(fd, mapping_c.as_bytes())?;
+    close(fd)
 }
+
+fn map_root_user() -> nix::Result<()> {
+    write_mapping("/proc/self/uid_map", "0 1000 1")?;
+    write_mapping("/proc/self/setgroups", "deny")?;
+    write_mapping("/proc/self/gid_map", "0 1000 1")
+}
+
 fn create_namespaces() {
-    match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS) {
-        Ok(_) => {
-
-            let uid_map = format!("0 {} 1", 1000);
-            // let gid_map = format!("0 {} 1", 1000);
-        
-            // Write the UID and GID mappings
-            write_mapping("/proc/self/setgroups", "deny").unwrap();
-
-            // Set UID and GID mappings
-            write_mapping("/proc/self/uid_map", "0 1000 1").unwrap(); // Replace 1000 with your UID
-            write_mapping("/proc/self/gid_map", "0 1000 1").unwrap(); // Replace 1000 with your GID
-        
-        
-            println!("Successfully created a new user and mount namespace.")
+    match unshare(
+        CloneFlags::CLONE_NEWUSER
+            | CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWPID
+            | CloneFlags::CLONE_NEWUTS,
+    ) {
+        Ok(_) => (),
+        Err(err) => {
+            eprintln!("Failed to create a new user namespace: {:?}", err.desc());
+            exit(1);
         }
-        Err(err) => eprintln!("Failed to create a new user namespace: {:?}", err.desc()),
     }
-
-
 }
 
-fn isolate_filesystem(os_path: &OsString) {
-    chdir("/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/debian")
-        .expect("chdir failed");
+fn isolate_filesystem(container_path: &str, os_path: &OsString) {
+    chdir(container_path).expect("chdir failed");
     chroot(".").expect("Failed to apply chroot");
-    let _ = execute_child_process("mkdir -p /dev/pts", &os_path);
+    Command::new("sh")
+        .arg("-c")
+        .arg("mkdir -p /dev/pts")
+        .env("PATH", os_path)
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LANGUAGE", "C")
+        .spawn()
+        .expect("Failed to execute command");
 }
 
-fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
+fn execute_child_process(command: &str, os_path: &OsString, logger: &Sender<LogMessage>) -> u32 {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -68,22 +219,40 @@ fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env("LANGUAGE", "C")
-        // .env("TERM", "xterm-256color")
         .spawn()
         .expect("Failed to execute command");
-    child.wait().expect("Failed to wait on command");
 
     let pid = child.id();
+
+    // Log the start of the process
+    logger
+        .send(LogMessage {
+            command: command.to_string(),
+            pid,
+            status: "started".to_string(),
+        })
+        .expect("Failed to send log message");
+
+    let status = child.wait().expect("Failed to wait on command");
+
+    // Log the completion of the process
+    let status_str = if status.success() { "done" } else { "failed" };
+    logger
+        .send(LogMessage {
+            command: command.to_string(),
+            pid,
+            status: status_str.to_string(),
+        })
+        .expect("Failed to send log message");
 
     pid
 }
 
-fn main() {
-    // Command::new("sh").arg("-c").arg("whoami").spawn().unwrap();
-
-    let path_result = get_path_from_env_file(Path::new(
-        "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/debian/.env",
-    ));
+fn tenkai(container_path: &str, env_path: &str) {
+    let env_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/debian/.env";
+    let container_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/debian";
+    fs::create_dir_all("binding_vow").expect("Failed to establish the binding vow"); // Creates the directory if it does not exist
+    let path_result = get_path_from_env_file(Path::new(env_path));
     // Check the result and handle errors
     let os_path = match path_result {
         Ok(Some(path)) => OsString::from(path),
@@ -97,58 +266,73 @@ fn main() {
         }
     };
     create_namespaces();
-    // let mut container_info =
-    // File::create("container_status.txt").expect("Failed to create file");
-    // let mut demon_info = OpenOptions::new()
-    //     .write(true)
-    //     .append(true)
-    //     .create(true)
-    //     .open("childern_status.csv")
-    //     .expect("Failed to open file");
     unsafe {
         match fork() {
-            Ok(ForkResult::Parent { child, .. }) => {
-                println!("Parent process, child pid: {}", child);
-                Command::new("sh")
-                    .arg("-c")
-                    .arg("id")
-                    .status()
-                    .unwrap();
-                // let uid_on_host = 1000; // Replace with actual host UID of Nyanpasu
-                // let uid_in_ns = 0;
-                // let count = 1;
-
-                // let uid_map = format!(" {} {} {} {}", child, uid_in_ns, uid_on_host, count);
-                // let gid_map = format!("{} {} {} {}", child, uid_in_ns, uid_on_host, count);
-                // println!("uid_map: {}", uid_map);
-                // println!("gid_map: {}", gid_map);
-                // Command::new("sh")
-                //     .arg("-c")
-                //     .arg(&format!("newuidmap {}", uid_map))
-                //     .status()
-                //     .expect("Failed to execute newuidmap");
-
-                // Command::new("sh")
-                //     .arg("-c")
-                //     .arg(&format!("newgidmap {}", gid_map))
-                //     .status()
-                //     .expect("Failed to execute newgidmap");
-
-                let _ = nix::sys::wait::waitpid(child, None);
-            }
+            Ok(ForkResult::Parent { child, .. }) => match waitpid(child, None) {
+                Ok(_) => (),
+                Err(err) => {
+                    eprintln!("waitpid failed: {}", err);
+                    exit(1);
+                }
+            },
             Ok(ForkResult::Child) => {
-                isolate_filesystem(&os_path);
-                let command_to_execute: &str =
-                    // "while true; do date >> timestamp.log; sleep 10; done";
-                "apt-get update";
-                // "apt-get update && apt-get install -y apt-utils";
-                // "rm -r /dev/null";
-                // "ls dev";
-                // "whoami";
-                let demon_pid = execute_child_process(command_to_execute, &os_path);
-                println!("Child process, demon pid: {}", demon_pid);
+                match map_root_user() {
+                    Ok(_) => {
+                        // get the current pid
+                        let pid = getpid().as_raw();
+                        let logger = start_logger_thread(pid.try_into().unwrap());
+                        isolate_filesystem(&container_path, &os_path);
+                        let command_to_execute: &str =
+                        // "while true; do date >> timestamp.log; sleep 10; done";
+                        // "apt-get update";
+                        // "rm -r /dev/null";
+                        "ls dev";
+                        // "id";
+                        // "apt-get update && apt-get install -y apt-utils"; // does not work
+                        let demon_pid =
+                            execute_child_process(command_to_execute, &os_path, &logger);
+                        println!("Child process, demon pid: {}", demon_pid);
+                    }
+                    Err(err) => {
+                        eprintln!("Mapping root user failed: {}", err);
+                        exit(1);
+                    }
+                }
             }
-            Err(e) => eprintln!("First fork failed: {:?}", e),
+            Err(err) => {
+                eprintln!("fork failed: {}", err);
+                exit(1);
+            }
         }
     }
+}
+fn main() {
+    let cli = Cli::parse();
+
+    match &cli.command {
+        Commands::Inspect { pid, all } => {
+            if *all {
+                inspect_all_processes();
+            } else if let Some(pids) = pid {
+                inspect_specific_processes(pids);
+            } else {
+                println!("No specific PIDs provided. Use --all to inspect all processes.");
+            }
+        }
+        Commands::Tenkai { path, env } => {
+            if (path != "") && (env != "") {
+                tenkai(path, env);
+            }
+        }
+        Commands::Start { path, env } => {
+            if (path != "") && (env != "") {
+                tenkai(path, env);
+            } else {
+                eprintln!(
+                    "Error: Both 'path' and 'env' arguments are required for the start command"
+                );
+            }
+        }
+    }
+    // tenkai("", "")
 }
