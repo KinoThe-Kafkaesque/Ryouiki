@@ -1,15 +1,17 @@
 extern crate nix;
 
-use nix::libc::{c_char, mount};
 use nix::sched::{unshare, CloneFlags};
+use nix::sys::wait::waitpid;
 use nix::unistd::{chdir, fork, ForkResult};
 // use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Result, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::chroot;
 use std::path::Path;
-use std::process::Command;
+use std::process::{exit, Command};
+use nix::mount::{mount, MsFlags};
+use std::time::Duration;
 fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -23,65 +25,39 @@ fn get_path_from_env_file(file_path: &Path) -> io::Result<Option<String>> {
 
     Ok(None)
 }
-
-fn create_namespaces() {
-    match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS) {
-        Ok(_) => {
-            // Get the current user ID in the parent namespace
-            let uid_output = Command::new("id").arg("-u").output();
-            match uid_output {
-                Ok(output) => {
-                    if !output.status.success() {
-                        eprintln!("Failed to get user ID");
-                    } else {
-                        let uid = std::str::from_utf8(&output.stdout).unwrap_or("").trim();
-                        println!("Current User ID: {}", &uid);
-                    }
-                }
-                Err(err) => {
-                    eprintln!("Failed to run command: {}", err);
-                }
-            }
-            println!("Successfully created a new user and mount namespace.")
-        }
-        Err(err) => eprintln!("Failed to create a new user namespace: {:?}", err),
-    }
-}
-fn mount_dev_pts() -> std::result::Result<(), std::io::Error> {
-    let mkdir_output = Command::new("sh")
-        .arg("-c")
-        .arg("mkdir -p /dev/pts")
-        .output()?;
-
-    if !mkdir_output.status.success() {
-        let err_msg = std::str::from_utf8(&mkdir_output.stderr)
-            .unwrap_or("Failed to read error message")
-            .trim();
-        eprintln!("Failed to create /dev/pts directory: {}", err_msg);
-        return Err(io::Error::new(io::ErrorKind::Other, "Mkdir command failed"));
-    }
-
-    // Attempt to mount /dev/pts
-    let mount_output = Command::new("sh")
-        .arg("-c")
-        .arg("mount -t devpts devpts /dev/pts")
-        .output()?;
-
-    if !mount_output.status.success() {
-        let err_msg = std::str::from_utf8(&mount_output.stderr)
-            .unwrap_or("Failed to read error message")
-            .trim();
-        eprintln!("Failed to mount /dev/pts: {}", err_msg);
-        return Err(io::Error::new(io::ErrorKind::Other, "Mount command failed"));
-    }
-
+fn write_mapping(file: &str, mapping: &str) -> std::io::Result<()> {
+    let mut file = File::create(file)?;
+    file.write_all(mapping.as_bytes())?;
     Ok(())
 }
-fn isolate_filesystem() {
+fn create_namespaces() {
+    match unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUTS) {
+        Ok(_) => {
+
+            let uid_map = format!("0 {} 1", 1000);
+            // let gid_map = format!("0 {} 1", 1000);
+        
+            // Write the UID and GID mappings
+            write_mapping("/proc/self/setgroups", "deny").unwrap();
+
+            // Set UID and GID mappings
+            write_mapping("/proc/self/uid_map", "0 1000 1").unwrap(); // Replace 1000 with your UID
+            write_mapping("/proc/self/gid_map", "0 1000 1").unwrap(); // Replace 1000 with your GID
+        
+        
+            println!("Successfully created a new user and mount namespace.")
+        }
+        Err(err) => eprintln!("Failed to create a new user namespace: {:?}", err.desc()),
+    }
+
+
+}
+
+fn isolate_filesystem(os_path: &OsString) {
     chdir("/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/debian")
         .expect("chdir failed");
     chroot(".").expect("Failed to apply chroot");
-    mount_dev_pts().expect("Failed to mount devpts");
+    let _ = execute_child_process("mkdir -p /dev/pts", &os_path);
 }
 
 fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
@@ -103,11 +79,11 @@ fn execute_child_process(command: &str, os_path: &OsString) -> u32 {
 }
 
 fn main() {
-    create_namespaces();
+    // Command::new("sh").arg("-c").arg("whoami").spawn().unwrap();
+
     let path_result = get_path_from_env_file(Path::new(
         "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/debian/.env",
     ));
-
     // Check the result and handle errors
     let os_path = match path_result {
         Ok(Some(path)) => OsString::from(path),
@@ -120,59 +96,59 @@ fn main() {
             return; // Or handle the error as appropriate for your application
         }
     };
-
+    create_namespaces();
+    // let mut container_info =
+    // File::create("container_status.txt").expect("Failed to create file");
+    // let mut demon_info = OpenOptions::new()
+    //     .write(true)
+    //     .append(true)
+    //     .create(true)
+    //     .open("childern_status.csv")
+    //     .expect("Failed to open file");
     unsafe {
-        let mut container_info =
-            File::create("container_status.txt").expect("Failed to create file");
-        let mut demon_info = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .create(true)
-            .open("childern_status.csv")
-            .expect("Failed to open file");
         match fork() {
             Ok(ForkResult::Parent { child, .. }) => {
                 println!("Parent process, child pid: {}", child);
+                Command::new("sh")
+                    .arg("-c")
+                    .arg("id")
+                    .status()
+                    .unwrap();
+                // let uid_on_host = 1000; // Replace with actual host UID of Nyanpasu
+                // let uid_in_ns = 0;
+                // let count = 1;
+
+                // let uid_map = format!(" {} {} {} {}", child, uid_in_ns, uid_on_host, count);
+                // let gid_map = format!("{} {} {} {}", child, uid_in_ns, uid_on_host, count);
+                // println!("uid_map: {}", uid_map);
+                // println!("gid_map: {}", gid_map);
+                // Command::new("sh")
+                //     .arg("-c")
+                //     .arg(&format!("newuidmap {}", uid_map))
+                //     .status()
+                //     .expect("Failed to execute newuidmap");
+
+                // Command::new("sh")
+                //     .arg("-c")
+                //     .arg(&format!("newgidmap {}", gid_map))
+                //     .status()
+                //     .expect("Failed to execute newgidmap");
+
                 let _ = nix::sys::wait::waitpid(child, None);
-                writeln!(container_info, "Container with PID {} is running", child)
-                    .expect("Failed to write to file");
             }
             Ok(ForkResult::Child) => {
-                match fork() {
-                    Ok(ForkResult::Parent { .. }) => {
-                        std::process::exit(0); // First child exits
-                    }
-                    Ok(ForkResult::Child) => {
-                        match fork() {
-                            Ok(ForkResult::Parent { child, .. }) => {
-                                println!("demon pid: {}", child);
-                                std::process::exit(0)
-                            } // First child exits
-                            Ok(ForkResult::Child) => {
-                                nix::unistd::setsid().expect("Failed to create new session");
-                                isolate_filesystem();
-                                // let command_to_execute =
-                                //     "while true; do date >> timestamp.log; sleep 10; done";
-                                let command_to_execute: &str =
-                                    "apt-get update && apt-get install -y apt-utils";
-                                // "ls /dev";
-                                let demon_pid = execute_child_process(command_to_execute, &os_path);
-                                writeln!(
-                                    demon_info,
-                                    "{},{}",
-                                    &command_to_execute,
-                                    &demon_pid.to_string()
-                                )
-                                .expect("Failed to write to file");
-                                demon_info.flush().expect("Failed to flush file");
-                            }
-                            Err(_) => println!("Second fork failed"),
-                        }
-                    }
-                    Err(_) => println!("Fork failed"),
-                }
+                isolate_filesystem(&os_path);
+                let command_to_execute: &str =
+                    // "while true; do date >> timestamp.log; sleep 10; done";
+                "apt-get update";
+                // "apt-get update && apt-get install -y apt-utils";
+                // "rm -r /dev/null";
+                // "ls dev";
+                // "whoami";
+                let demon_pid = execute_child_process(command_to_execute, &os_path);
+                println!("Child process, demon pid: {}", demon_pid);
             }
-            Err(_) => println!("Fork failed"),
+            Err(e) => eprintln!("First fork failed: {:?}", e),
         }
     }
 }
