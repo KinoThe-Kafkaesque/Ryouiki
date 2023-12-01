@@ -7,6 +7,7 @@ use nix::fcntl::OFlag;
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::getpid;
+use nix::unistd::Pid;
 use nix::unistd::{chdir, fork, ForkResult};
 use nix::unistd::{close, write};
 use std::collections::HashMap;
@@ -16,10 +17,12 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::RawFd;
 use std::os::unix::fs::chroot;
+use std::os::unix::thread;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{exit, Command};
 use std::sync::mpsc::{self, Sender};
+use std::time::Duration;
 struct LogMessage {
     command: String,
     pid: u32,
@@ -58,6 +61,10 @@ enum Commands {
         // env path
         #[clap(short, long)]
         env: String,
+
+        //command
+        #[clap(short, long)]
+        command: String,
     },
     Tenkai {
         // container path
@@ -67,6 +74,10 @@ enum Commands {
         // env path
         #[clap(short, long)]
         env: String,
+
+        //command
+        #[clap(short, long)]
+        command: String,
     },
 }
 
@@ -177,8 +188,8 @@ fn write_mapping(path: &str, mapping: &str) -> nix::Result<()> {
 }
 
 fn map_root_user() -> nix::Result<()> {
-    write_mapping("/proc/self/uid_map", "0 1000 1")?;
     write_mapping("/proc/self/setgroups", "deny")?;
+    write_mapping("/proc/self/uid_map", "0 1000 1")?;
     write_mapping("/proc/self/gid_map", "0 1000 1")
 }
 
@@ -187,7 +198,8 @@ fn create_namespaces() {
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWUTS,
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWNET,
     ) {
         Ok(_) => (),
         Err(err) => {
@@ -210,7 +222,18 @@ fn isolate_filesystem(container_path: &str, os_path: &OsString) {
         .spawn()
         .expect("Failed to execute command");
 }
+fn setup_slirp4netns(child_pid: Pid) {
+    let output = Command::new("slirp4netns")
+        .args(&["--configure", "--mtu=65520", &child_pid.to_string(), "tap0"])
+        .output()
+        .expect("Failed to execute slirp4netns");
 
+    // Handle the output, for example, print it
+    println!("Status: {}", output.status);
+    println!("pid: {}", &child_pid);
+    println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+}
 fn execute_child_process(command: &str, os_path: &OsString, logger: &Sender<LogMessage>) -> u32 {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -248,9 +271,9 @@ fn execute_child_process(command: &str, os_path: &OsString, logger: &Sender<LogM
     pid
 }
 
-fn tenkai(container_path: &str, env_path: &str) {
-    let env_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/debian/.env";
-    let container_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/debian";
+fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
+    let env_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/utils/.env";
+    let container_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/utils";
     fs::create_dir_all("binding_vow").expect("Failed to establish the binding vow"); // Creates the directory if it does not exist
     let path_result = get_path_from_env_file(Path::new(env_path));
     // Check the result and handle errors
@@ -268,13 +291,17 @@ fn tenkai(container_path: &str, env_path: &str) {
     create_namespaces();
     unsafe {
         match fork() {
-            Ok(ForkResult::Parent { child, .. }) => match waitpid(child, None) {
-                Ok(_) => (),
-                Err(err) => {
-                    eprintln!("waitpid failed: {}", err);
-                    exit(1);
-                }
-            },
+            Ok(ForkResult::Parent { child, .. }) => {
+                // can't run more than one task inside parent
+                // match waitpid(child, None) {
+                //     Ok(_) => (),
+                //     Err(err) => {
+                //         eprintln!("waitpid failed: {}", err);
+                //         exit(1);
+                //     }
+                // };
+                setup_slirp4netns(child);
+            }
             Ok(ForkResult::Child) => {
                 match map_root_user() {
                     Ok(_) => {
@@ -282,19 +309,25 @@ fn tenkai(container_path: &str, env_path: &str) {
                         let pid = getpid().as_raw();
                         let logger = start_logger_thread(pid.try_into().unwrap());
                         isolate_filesystem(&container_path, &os_path);
+                        // std::thread::sleep(Duration::from_secs(2));
                         let command_to_execute: &str =
                         // "while true; do date >> timestamp.log; sleep 10; done";
                         // "apt-get update";
                         // "rm -r /dev/null";
-                        "ls dev";
+                        // "ls dev";
                         // "id";
+                        // "apt-config dump | grep Sandbox::User";
+                        // "cat <<EOF > /etc/apt/apt.conf.d/sandbox-disable";
                         // "apt-get update && apt-get install -y apt-utils"; // does not work
+                        // "apt-get update"; // does not work
+                        "bash";
+                        // "ip route show dev tap0";
                         let demon_pid =
                             execute_child_process(command_to_execute, &os_path, &logger);
                         println!("Child process, demon pid: {}", demon_pid);
                     }
                     Err(err) => {
-                        eprintln!("Mapping root user failed: {}", err);
+                        eprintln!("Mapping root user failed: {}", err.desc());
                         exit(1);
                     }
                 }
@@ -319,14 +352,14 @@ fn main() {
                 println!("No specific PIDs provided. Use --all to inspect all processes.");
             }
         }
-        Commands::Tenkai { path, env } => {
+        Commands::Tenkai { path, env, command } => {
             if (path != "") && (env != "") {
-                tenkai(path, env);
+                tenkai(path, env, command);
             }
         }
-        Commands::Start { path, env } => {
+        Commands::Start { path, env, command } => {
             if (path != "") && (env != "") {
-                tenkai(path, env);
+                tenkai(path, env, command);
             } else {
                 eprintln!(
                     "Error: Both 'path' and 'env' arguments are required for the start command"
