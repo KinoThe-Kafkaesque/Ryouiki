@@ -111,7 +111,7 @@ This is a minimal implementation intended for educational purposes. It may not b
 
 ## credits
 
-[missingsemester](https://missingsemester.io/)
-[podman](https://github.com/containers/podman)
-chatgpt
-random starngers on the internet❤️
+- [missingsemester](https://missingsemester.io/)
+- [podman](https://github.com/containers/podman)
+- chatgpt
+- random strangers on the internet❤️
