@@ -1,6 +1,9 @@
 # Ryouiki
 
-![Stand Proud](him/nahidwin.png)
+<div style="text-align:center;">
+  <img src="him/nahidwin.png" alt="Stand Proud">
+</div>
+
 
 ## Overview
 
