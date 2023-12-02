@@ -4,27 +4,26 @@ use clap::Parser;
 use clap::Subcommand;
 use nix::fcntl::open;
 use nix::fcntl::OFlag;
+use nix::mount::mount;
+use nix::mount::MsFlags;
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::wait::waitpid;
 use nix::unistd::getpid;
-use nix::unistd::Pid;
 use nix::unistd::{chdir, fork, ForkResult};
 use nix::unistd::{close, write};
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
-use std::fmt::format;
 use std::fs::OpenOptions;
 use std::fs::{self, File};
+use std::io::ErrorKind;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::RawFd;
 use std::os::unix::fs::chroot;
-use std::os::unix::thread;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{exit, Command};
 use std::sync::mpsc::{self, Sender};
-use std::time::Duration;
 struct LogMessage {
     command: String,
     pid: u32,
@@ -199,7 +198,8 @@ fn create_namespaces() {
     match unshare(
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
-            // | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWNET,
     ) {
         Ok(_) => (),
@@ -210,40 +210,28 @@ fn create_namespaces() {
     }
 }
 
-fn isolate_filesystem(container_path: &str, os_path: &OsString) {
+fn isolate_filesystem(container_path: &str) {
     chdir(container_path).expect("chdir failed");
     chroot(".").expect("Failed to apply chroot");
-    Command::new("sh")
-        .arg("-c")
-        .arg("mkdir -p /dev/pts")
-        .env("PATH", os_path)
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("LANGUAGE", "C")
-        .spawn()
-        .expect("Failed to execute command");
-}
-fn setup_slirp4netns(child_pid: Pid) {
-    // let output = Command::new("slirp4netns")
-    //     .args(&[
-    //         "--configure",
-    //         "--mtu=65520",
-    //         "--disable-host-loopback",
-    //         &child_pid.to_string(),
-    //         "tap0",
-    //     ])
-    //     .output()
-    //     .expect("failed to slirp4netns");
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(format!("echo {} > /tmp/pid", &child_pid))
-        .output()
-        .expect("failed to register PID");
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("hacks/slirp4netns.sh")
-        .spawn()
-        .expect("failed to execute process");
+    match fs::create_dir("dev/pts") {
+        Ok(_) => println!("Directory created"),
+        Err(ref e) if e.kind() == ErrorKind::AlreadyExists => {
+            // If the directory already exists, it's okay
+            println!("/dev/pts already exists, which is fine");
+        }
+        Err(e) => {
+            // Handle any other kind of error
+            panic!("Failed to create /dev/pts: {}", e);
+        }
+    }
+    mount(
+        Some(Path::new("/dev/pts")),
+        Path::new("/dev/pts"),
+        Some("devpts"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .expect("Failed to mount /dev/pts");
 }
 fn execute_child_process(command: &str, os_path: &OsString, logger: &Sender<LogMessage>) -> u32 {
     let mut child = Command::new("sh")
@@ -283,8 +271,8 @@ fn execute_child_process(command: &str, os_path: &OsString, logger: &Sender<LogM
 }
 
 fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
-    let env_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/utils/.env";
-    let container_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/utils";
+    // let env_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/manifest/utils/.env";
+    // let container_path = "/home/Nyanpasu/Desktop/code/vscodegit/Ryouiki/assets/containers/utils";
     fs::create_dir_all("binding_vow").expect("Failed to establish the binding vow"); // Creates the directory if it does not exist
     let path_result = get_path_from_env_file(Path::new(env_path));
     // Check the result and handle errors
@@ -300,28 +288,18 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
         }
     };
 
-    let mut sibling = Command::new("sh")
+    let sibling = Command::new("sh")
         .stdin(Stdio::piped())
         .spawn()
         .expect("Failed to start sh process");
 
-    let sibling_pid = sibling.id();
     let pid = getpid();
 
     create_namespaces();
-    // setup_slirp4netns();
     unsafe {
         match fork() {
             Ok(ForkResult::Parent { child, .. }) => {
-                // can't run more than one task inside parent
-                // match waitpid(child, None) {
-                //     Ok(_) => (print!("{}",child) ),
-                //     Err(err) => {
-                //         eprintln!("waitpid failed: {}", err);
-                //         exit(1);
-                //     }
-                // };
-                // setup_slirp4netns(child);
+                print!("{} ", child);
                 let command = format!(
                     "slirp4netns  --configure --mtu=65520 --disable-host-loopback {} tap0\n",
                     child
@@ -332,7 +310,7 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
                     .write_all(command.as_bytes())
                     .unwrap();
                 match waitpid(child, None) {
-                    Ok(_) => (print!("{}", child)),
+                    Ok(_) => print!("{}", child),
                     Err(err) => {
                         eprintln!("waitpid failed: {}", err);
                         exit(1);
@@ -342,41 +320,27 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
             Ok(ForkResult::Child) => {
                 match map_root_user() {
                     Ok(_) => {
-                        let output = Command::new("sh")
-                            .arg("-c")
-                            .arg("echo 'nameserver 10.0.2.3' > /tmp/resolv.conf")
-                            .output()
-                            .expect("failed to execute process");
+                        let mut tmp_nameserver = File::create("/tmp/resolv.conf")
+                            .expect("Failed to create /tmp/resolv.conf");
 
-                        let output = Command::new("sh")
-                            .arg("-c")
-                            .arg("mount --bind /tmp/resolv.conf /etc/resolv.conf")
-                            .output()
-                            .expect("failed to execute process");
+                        writeln!(tmp_nameserver, "nameserver 10.0.2.3")
+                            .expect("Failed to write to /tmp/resolv.conf");
+                        let result = mount(
+                            Some(Path::new("/tmp/resolv.conf")),
+                            Path::new("/etc/resolv.conf"),
+                            None::<&Path>,
+                            MsFlags::MS_BIND,
+                            None::<&str>,
+                        );
+                        // Check for errors
+                        match result {
+                            Ok(_) => println!("Mount successful"),
+                            Err(err) => eprintln!("Mount failed: {}", err),
+                        }
                         // get the current pid
                         let logger = start_logger_thread(pid.as_raw().try_into().unwrap());
-                        // match unshare(
-                        //     CloneFlags::CLONE_NEWPID
-                        // ) {
-                        //     Ok(_) => (),
-                        //     Err(err) => {
-                        //         eprintln!(
-                        //             "Failed to create a new user namespace: {:?}",
-                        //             err.desc()
-                        //         );
-                        //         exit(1);
-                        //     }
-                        // }
-                        // let output = Command::new("sh")
-                        //     .arg("-c")
-                        //     .arg("unhare --pid --fork")
-                        //     .output()
-                        //     .expect("failed to execute process");
-                        isolate_filesystem(&container_path, &os_path);
-                        // std::thread::sleep(Duration::from_secs(2));
-                        let command_to_execute: &str = "bash";
-                        // let command_to_execute: &str = "ping 8.8.8.8";
-                        // "ping 8.8.8.8";
+                        isolate_filesystem(&container_path);
+                        // let command_to_execute: &str = "bash";
                         let demon_pid =
                             execute_child_process(command_to_execute, &os_path, &logger);
                         println!("Child process, demon pid: {}", demon_pid);
