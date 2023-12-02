@@ -1,5 +1,7 @@
 # Ryouiki
 
+![Stand Proud](him/nahidwin.png)
+
 ## Overview
 
 Ryouiki implements a minimal rootless containerization system. It's designed to isolate processes in a Linux environment, providing a lightweight alternative to full-scale container engines. The system creates isolated environments (containers) where processes can run independently from the host and each other.
