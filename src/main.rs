@@ -12,6 +12,7 @@ use nix::unistd::{chdir, fork, ForkResult};
 use nix::unistd::{close, write};
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
+use std::fmt::format;
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
@@ -20,6 +21,7 @@ use std::os::unix::fs::chroot;
 use std::os::unix::thread;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::process::{exit, Command};
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
@@ -197,7 +199,7 @@ fn create_namespaces() {
     match unshare(
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWUTS
+            // | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWNET,
     ) {
         Ok(_) => (),
@@ -230,19 +232,18 @@ fn setup_slirp4netns(child_pid: Pid) {
     //         &child_pid.to_string(),
     //         "tap0",
     //     ])
+    //     .output()
+    //     .expect("failed to slirp4netns");
     let output = Command::new("sh")
         .arg("-c")
-        .arg(format!(
-            "slirp4netns --configure --mtu=65520 --disable-host-loopback {} tap0",
-            &child_pid
-        ))
+        .arg(format!("echo {} > /tmp/pid", &child_pid))
         .output()
-        .expect("Failed to execute slirp4netns");
-    // Handle the output, for example, print it
-    println!("Status: {}", output.status);
-    println!("pid: {}", &child_pid);
-    println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-    println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+        .expect("failed to register PID");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("hacks/slirp4netns.sh")
+        .spawn()
+        .expect("failed to execute process");
 }
 fn execute_child_process(command: &str, os_path: &OsString, logger: &Sender<LogMessage>) -> u32 {
     let mut child = Command::new("sh")
@@ -298,20 +299,45 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
             return; // Or handle the error as appropriate for your application
         }
     };
+
+    let mut sibling = Command::new("sh")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Failed to start sh process");
+
+    let sibling_pid = sibling.id();
     let pid = getpid();
+
     create_namespaces();
+    // setup_slirp4netns();
     unsafe {
         match fork() {
             Ok(ForkResult::Parent { child, .. }) => {
                 // can't run more than one task inside parent
                 // match waitpid(child, None) {
-                //     Ok(_) => (),
+                //     Ok(_) => (print!("{}",child) ),
                 //     Err(err) => {
                 //         eprintln!("waitpid failed: {}", err);
                 //         exit(1);
                 //     }
                 // };
-                setup_slirp4netns(child);
+                // setup_slirp4netns(child);
+                let command = format!(
+                    "slirp4netns  --configure --mtu=65520 --disable-host-loopback {} tap0\n",
+                    child
+                );
+                sibling
+                    .stdin
+                    .unwrap()
+                    .write_all(command.as_bytes())
+                    .unwrap();
+                match waitpid(child, None) {
+                    Ok(_) => (print!("{}", child)),
+                    Err(err) => {
+                        eprintln!("waitpid failed: {}", err);
+                        exit(1);
+                    }
+                };
             }
             Ok(ForkResult::Child) => {
                 match map_root_user() {
@@ -348,8 +374,8 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
                         //     .expect("failed to execute process");
                         isolate_filesystem(&container_path, &os_path);
                         // std::thread::sleep(Duration::from_secs(2));
-                        // let command_to_execute: &str = "bash";
-                        let command_to_execute: &str = "ping 8.8.8.8";
+                        let command_to_execute: &str = "bash";
+                        // let command_to_execute: &str = "ping 8.8.8.8";
                         // "ping 8.8.8.8";
                         let demon_pid =
                             execute_child_process(command_to_execute, &os_path, &logger);
@@ -367,7 +393,9 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
             }
         }
     }
+    // Continue with child process operations...
 }
+
 fn main() {
     let cli = Cli::parse();
 
