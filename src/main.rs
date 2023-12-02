@@ -197,7 +197,6 @@ fn create_namespaces() {
     match unshare(
         CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWNET,
     ) {
@@ -223,11 +222,22 @@ fn isolate_filesystem(container_path: &str, os_path: &OsString) {
         .expect("Failed to execute command");
 }
 fn setup_slirp4netns(child_pid: Pid) {
-    let output = Command::new("slirp4netns")
-        .args(&["--configure", "--mtu=65520", &child_pid.to_string(), "tap0"])
+    // let output = Command::new("slirp4netns")
+    //     .args(&[
+    //         "--configure",
+    //         "--mtu=65520",
+    //         "--disable-host-loopback",
+    //         &child_pid.to_string(),
+    //         "tap0",
+    //     ])
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "slirp4netns --configure --mtu=65520 --disable-host-loopback {} tap0",
+            &child_pid
+        ))
         .output()
         .expect("Failed to execute slirp4netns");
-
     // Handle the output, for example, print it
     println!("Status: {}", output.status);
     println!("pid: {}", &child_pid);
@@ -288,6 +298,7 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
             return; // Or handle the error as appropriate for your application
         }
     };
+    let pid = getpid();
     create_namespaces();
     unsafe {
         match fork() {
@@ -305,23 +316,41 @@ fn tenkai(container_path: &str, env_path: &str, command_to_execute: &str) {
             Ok(ForkResult::Child) => {
                 match map_root_user() {
                     Ok(_) => {
+                        let output = Command::new("sh")
+                            .arg("-c")
+                            .arg("echo 'nameserver 10.0.2.3' > /tmp/resolv.conf")
+                            .output()
+                            .expect("failed to execute process");
+
+                        let output = Command::new("sh")
+                            .arg("-c")
+                            .arg("mount --bind /tmp/resolv.conf /etc/resolv.conf")
+                            .output()
+                            .expect("failed to execute process");
                         // get the current pid
-                        let pid = getpid().as_raw();
-                        let logger = start_logger_thread(pid.try_into().unwrap());
+                        let logger = start_logger_thread(pid.as_raw().try_into().unwrap());
+                        // match unshare(
+                        //     CloneFlags::CLONE_NEWPID
+                        // ) {
+                        //     Ok(_) => (),
+                        //     Err(err) => {
+                        //         eprintln!(
+                        //             "Failed to create a new user namespace: {:?}",
+                        //             err.desc()
+                        //         );
+                        //         exit(1);
+                        //     }
+                        // }
+                        // let output = Command::new("sh")
+                        //     .arg("-c")
+                        //     .arg("unhare --pid --fork")
+                        //     .output()
+                        //     .expect("failed to execute process");
                         isolate_filesystem(&container_path, &os_path);
                         // std::thread::sleep(Duration::from_secs(2));
-                        let command_to_execute: &str =
-                        // "while true; do date >> timestamp.log; sleep 10; done";
-                        // "apt-get update";
-                        // "rm -r /dev/null";
-                        // "ls dev";
-                        // "id";
-                        // "apt-config dump | grep Sandbox::User";
-                        // "cat <<EOF > /etc/apt/apt.conf.d/sandbox-disable";
-                        // "apt-get update && apt-get install -y apt-utils"; // does not work
-                        // "apt-get update"; // does not work
-                        "bash";
-                        // "ip route show dev tap0";
+                        // let command_to_execute: &str = "bash";
+                        let command_to_execute: &str = "ping 8.8.8.8";
+                        // "ping 8.8.8.8";
                         let demon_pid =
                             execute_child_process(command_to_execute, &os_path, &logger);
                         println!("Child process, demon pid: {}", demon_pid);
