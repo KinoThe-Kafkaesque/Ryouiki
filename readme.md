@@ -27,13 +27,13 @@ Ryouiki implements a minimal rootless containerization system. It's designed to 
 1. Clone the repository:
 
    ```sh
-   git clone [repository-url]
+   git clone https://github.com/KinoThe-Kafkaesque/Ryouiki.git
    ```
 
 2. Navigate to the project directory:
 
    ```sh
-   cd [project-directory]
+   cd Ryouiki
    ```
 
 3. Build the project:
